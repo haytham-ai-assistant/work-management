@@ -23,3 +23,53 @@ Thumbs.db
 *.zip
 *.tar
 *.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.pydevproject
+.project
+.settings/
+.classpath
+
+# 实验数据
+data/raw/
+*.npz
+*.npy
+*.pkl
+*.pickle
+
+# 输出目录
+output/
+results/
+*.png
+*.jpg
+*.pdf

@@ -7,7 +7,14 @@
 
 import numpy as np
 from typing import List, Tuple, Optional
-import matplotlib.pyplot as plt
+
+# 尝试导入matplotlib，如果不可用则提供占位
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    plt = None
 
 
 class MarkerDetection:
@@ -121,20 +128,137 @@ class MarkerDetection:
         displacement_field = deformed_markers - original_markers
         return displacement_field
     
-    def detect_markers_from_image(self, image: np.ndarray) -> np.ndarray:
+    def generate_synthetic_image(self, markers: Optional[np.ndarray] = None,
+                                image_shape: Tuple[int, int] = (480, 640),
+                                marker_intensity: float = 255.0,
+                                background_intensity: float = 50.0,
+                                marker_std: float = 2.0) -> np.ndarray:
         """
-        从图像中检测标记点（占位函数，实际需要OpenCV实现）
-        
+        生成合成图像，包含标记点
+
+        在没有真实传感器图像时，用于算法测试和验证
+
         Args:
-            image: 输入图像
+            markers: 标记点坐标 (N, 2)，如果为None则自动生成
+            image_shape: 图像尺寸 (height, width)
+            marker_intensity: 标记点亮度 (0-255)
+            background_intensity: 背景亮度 (0-255)
+            marker_std: 标记点高斯模糊标准差
+
+        Returns:
+            image: 合成图像 (height, width)
+        """
+        if markers is None:
+            markers = self.generate_synthetic_markers(image_shape)
+
+        height, width = image_shape
+        image = np.ones((height, width)) * background_intensity
+
+        # 创建网格用于高斯分布
+        y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+
+        for x, y in markers:
+            # 计算每个像素到标记点的距离
+            distance_sq = (x_coords - x)**2 + (y_coords - y)**2
             
+            # 添加高斯斑点
+            intensity = marker_intensity * np.exp(-distance_sq / (2 * marker_std**2))
+            image += intensity
+
+        # 裁剪到有效范围
+        image = np.clip(image, 0, 255).astype(np.uint8)
+
+        return image
+
+    def detect_markers_from_image(self, image: np.ndarray,
+                                 intensity_threshold: float = 200.0,
+                                 min_distance: float = 10.0) -> np.ndarray:
+        """
+        从图像中检测标记点
+
+        在没有OpenCV时使用简化方法：阈值化 + 局部极大值检测
+
+        Args:
+            image: 输入图像 (2D numpy array)
+            intensity_threshold: 强度阈值 (0-255)
+            min_distance: 标记点之间的最小距离 (像素)
+
         Returns:
             markers: 检测到的标记点坐标 (N, 2)
         """
-        # 实际实现应使用OpenCV的HoughCircles或特征检测方法
-        # 这里返回空数组作为占位
-        print("警告：此方法需要OpenCV实现，当前返回空数组")
-        return np.array([])
+        # 检查图像维度
+        if len(image.shape) != 2:
+            if len(image.shape) == 3:
+                # 转换为灰度图（简单平均）
+                image = np.mean(image, axis=2)
+            else:
+                raise ValueError(f"不支持的图像维度: {image.shape}")
+
+        # 阈值化
+        binary = image > intensity_threshold
+
+        # 如果没有足够像素超过阈值，返回空数组
+        if np.sum(binary) < 10:
+            print(f"警告：只有 {np.sum(binary)} 个像素超过阈值 {intensity_threshold}，可能无标记点")
+            return np.array([])
+
+        # 找到连通区域（简化方法：使用局部极大值）
+        height, width = image.shape
+        markers = []
+
+        # 创建距离掩码以避免重复检测
+        visited = np.zeros((height, width), dtype=bool)
+
+        # 按强度排序的像素位置
+        bright_pixels = np.column_stack(np.where(image > intensity_threshold))
+        intensities = image[image > intensity_threshold]
+
+        if len(bright_pixels) == 0:
+            return np.array([])
+
+        # 按强度降序排序
+        sorted_indices = np.argsort(-intensities)
+        bright_pixels = bright_pixels[sorted_indices]
+
+        for y, x in bright_pixels:
+            # 如果已访问过附近区域，跳过
+            if visited[y, x]:
+                continue
+
+            # 标记为已访问
+            y_min = max(0, int(y - min_distance/2))
+            y_max = min(height, int(y + min_distance/2))
+            x_min = max(0, int(x - min_distance/2))
+            x_max = min(width, int(x + min_distance/2))
+            visited[y_min:y_max, x_min:x_max] = True
+
+            # 添加标记点
+            markers.append([x, y])
+
+        if len(markers) == 0:
+            return np.array([])
+
+        markers_array = np.array(markers)
+
+        # 后处理：移除离群点（如果标记点应大致呈网格分布）
+        if len(markers_array) > 10:
+            try:
+                # 计算标记点之间的平均距离
+                from scipy.spatial import distance_matrix
+                distances = distance_matrix(markers_array, markers_array)
+                np.fill_diagonal(distances, np.inf)
+                min_distances = np.min(distances, axis=1)
+                
+                # 移除距离异常的点（太近或太远）
+                median_dist = np.median(min_distances)
+                valid_mask = (min_distances > median_dist * 0.3) & (min_distances < median_dist * 3)
+                markers_array = markers_array[valid_mask]
+            except ImportError:
+                # scipy不可用，跳过后处理
+                pass
+
+        self.detected_markers = markers_array
+        return markers_array
     
     def visualize_markers(self, original_markers: np.ndarray, 
                          deformed_markers: Optional[np.ndarray] = None,
@@ -149,6 +273,16 @@ class MarkerDetection:
             displacement_field: 位移场（可选）
             save_path: 保存图像路径（可选）
         """
+        if not MATPLOTLIB_AVAILABLE:
+            print("警告：matplotlib不可用，无法可视化。请安装matplotlib以使用此功能。")
+            print("原始标记点数量:", len(original_markers))
+            if deformed_markers is not None:
+                print("变形后标记点数量:", len(deformed_markers))
+            if displacement_field is not None:
+                avg_displacement = np.mean(np.linalg.norm(displacement_field, axis=1))
+                print("平均位移:", avg_displacement, "像素")
+            return
+        
         fig, axes = plt.subplots(1, 2 if deformed_markers is not None else 1, 
                                 figsize=(12, 5))
         

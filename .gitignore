@@ -73,3 +73,7 @@ results/
 *.png
 *.jpg
 *.pdf
+
+# 实验数据目录（自动生成）
+projects/experimental_validation/data/
+projects/experimental_validation/results/

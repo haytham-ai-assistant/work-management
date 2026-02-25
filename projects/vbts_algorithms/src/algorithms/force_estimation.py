@@ -105,8 +105,8 @@ class ForceEstimation:
     
     def boussinesq_solution(self, displacement_field: np.ndarray, 
                            positions: np.ndarray, 
-                           grid_resolution: float = 1.0,
-                           regularization: float = 1e-6) -> np.ndarray:
+                            grid_resolution: float = 20.0,
+                            regularization: float = 1e-8) -> np.ndarray:
         """
         使用Boussinesq解计算表面力分布
         
@@ -363,7 +363,7 @@ class ForceEstimation:
         elif method == 'boussinesq':
             # 使用Boussinesq解
             force_grid = self.boussinesq_solution(
-                displacement_field, positions, grid_resolution=2.0, regularization=1e-6
+                displacement_field, positions, grid_resolution=20.0, regularization=1e-8
             )
             
             result['force_distribution'] = force_grid

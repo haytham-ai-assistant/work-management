@@ -204,16 +204,20 @@ class ForceEstimation:
     
     def finite_element_inverse(self, displacement_field: np.ndarray,
                               node_positions: np.ndarray,
-                              connectivity: np.ndarray) -> np.ndarray:
+                              connectivity: np.ndarray,
+                              regularization: float = 1e-6,
+                              check_condition: bool = True) -> np.ndarray:
         """
         有限元反问题求解：从位移场计算节点力
         
-        基于简化的弹簧网络模型构建刚度矩阵
+        基于简化的弹簧网络模型构建刚度矩阵，使用Tikhonov正则化处理病态问题
         
         Args:
             displacement_field: 节点位移场 (N, 2) 或 (N, 3) (单位: mm)
             node_positions: 节点坐标 (N, 2) (单位: mm)
             connectivity: 单元连接关系 (M, 3) 三角形单元
+            regularization: 正则化参数（默认: 1e-6）
+            check_condition: 是否检查刚度矩阵条件数（默认: True）
             
         Returns:
             node_forces: 节点力 (N, 2)
@@ -268,24 +272,43 @@ class ForceEstimation:
                         # 耦合项 (负号表示吸引力)
                         K[2*node_idx:2*node_idx+2, 2*node_jdx:2*node_jdx+2] -= np.eye(2) * k_elem / 6.0
         
-        # 添加对角正则化避免奇异性
-        K += np.eye(2 * n_nodes) * self.youngs_modulus * 1e-6
+        # 检查刚度矩阵条件数
+        if check_condition and n_nodes > 0:
+            try:
+                # 计算条件数（近似）
+                eigenvalues = np.linalg.eigvalsh(K[:min(10, K.shape[0]), :min(10, K.shape[1])])
+                cond_number = np.max(np.abs(eigenvalues)) / np.min(np.abs(eigenvalues[np.abs(eigenvalues) > 1e-10]))
+                if cond_number > 1e12:
+                    print(f"警告: 刚度矩阵条件数过大 ({cond_number:.2e})，增加正则化")
+                    regularization *= 100  # 自动增加正则化
+            except:
+                pass  # 条件数计算失败时继续
+        
+        # 添加Tikhonov正则化
+        # 使用正则化参数乘以单位矩阵
+        K_reg = K + np.eye(2 * n_nodes) * self.youngs_modulus * regularization
         
         # 位移向量 (展平)
         u = displacement_field.flatten()
         
         # 确保尺寸匹配
-        if len(u) != K.shape[0]:
+        if len(u) != K_reg.shape[0]:
             # 如果尺寸不匹配，创建简单对角刚度矩阵
             print("警告: 位移场尺寸与节点数不匹配，使用简化刚度矩阵")
-            K = np.eye(len(u)) * self.youngs_modulus * 0.1
+            K_reg = np.eye(len(u)) * self.youngs_modulus * 0.1
         
-        # 计算力: f = K * u
+        # 计算力: f = K_reg * u  (使用正则化后的刚度矩阵)
         try:
-            f = K @ u
-        except:
-            # 如果计算失败，使用简化方法
-            f = u * self.youngs_modulus * 0.1
+            f = K_reg @ u
+        except np.linalg.LinAlgError as e:
+            # 如果矩阵求解失败，尝试使用伪逆
+            print(f"警告: 矩阵求解失败 ({e})，使用伪逆")
+            try:
+                f = np.linalg.pinv(K_reg) @ u
+            except:
+                # 如果伪逆也失败，使用简化方法
+                print("警告: 伪逆也失败，使用简化方法")
+                f = u * self.youngs_modulus * 0.01  # 更小的比例因子
         
         # 重塑为节点力 (N, 2)
         node_forces = f.reshape(-1, 2)
@@ -363,17 +386,14 @@ class ForceEstimation:
                 tri = Delaunay(positions)
                 connectivity = tri.simplices
             except ImportError:
-                # 简化网格连接（假设点阵排列）
-                n_points = len(positions)
-                # 创建简单三角形网格（示例）
-                if n_points >= 3:
-                    connectivity = np.array([[0, 1, 2]], dtype=int)  # 仅一个三角形作为示例
-                else:
-                    connectivity = np.array([], dtype=int).reshape(0, 3)
-                print("注意：scipy不可用，使用简化网格连接")
+                # scipy不可用，为规则网格创建三角形网格连接
+                # 假设positions是近似规则排列的（来自标记点检测）
+                connectivity = self._create_grid_connectivity(positions)
+                print(f"注意：scipy不可用，使用规则网格连接 ({len(connectivity)} 个三角形)")
             
             node_forces = self.finite_element_inverse(
-                displacement_field, positions, connectivity
+                displacement_field, positions, connectivity,
+                regularization=1e-6, check_condition=True
             )
             
             result['force_distribution'] = node_forces
@@ -577,6 +597,97 @@ class ForceEstimation:
         }
         
         return cross_validation_result
+    
+    def _create_grid_connectivity(self, positions: np.ndarray) -> np.ndarray:
+        """
+        为规则网格创建三角形网格连接
+        
+        假设positions近似规则排列（如标记点检测的网格）
+        创建三角形网格连接，每个网格单元分成两个三角形
+        
+        Args:
+            positions: 节点位置 (N, 2)
+            
+        Returns:
+            connectivity: 三角形连接关系 (M, 3)
+        """
+        # 尝试检测网格结构
+        n_points = len(positions)
+        if n_points < 4:
+            # 点数太少，创建简单连接
+            if n_points >= 3:
+                return np.array([[0, 1, 2]], dtype=int)
+            else:
+                return np.array([], dtype=int).reshape(0, 3)
+        
+        # 使用k-means简单聚类检测网格结构
+        # 简单方法：按x坐标排序，假设近似网格排列
+        try:
+            # 按x和y坐标排序检测网格
+            sorted_by_x = positions[np.argsort(positions[:, 0])]
+            sorted_by_y = positions[np.argsort(positions[:, 1])]
+            
+            # 检测可能的行数和列数（假设为近似矩形网格）
+            # 使用简单启发式：查找x坐标的聚类
+            x_coords = positions[:, 0]
+            y_coords = positions[:, 1]
+            
+            # 使用分位数估计列数
+            x_unique = np.unique(np.round(x_coords, 1))  # 1mm精度
+            y_unique = np.unique(np.round(y_coords, 1))
+            
+            if len(x_unique) > 1 and len(y_unique) > 1:
+                # 可能是规则网格，创建网格连接
+                n_cols = len(x_unique)
+                n_rows = len(y_unique)
+                
+                if n_rows * n_cols == n_points:
+                    # 完美网格，创建规则三角形网格
+                    connectivity = []
+                    for i in range(n_rows - 1):
+                        for j in range(n_cols - 1):
+                            # 计算4个角点的索引
+                            idx_sw = i * n_cols + j
+                            idx_se = idx_sw + 1
+                            idx_nw = (i + 1) * n_cols + j
+                            idx_ne = idx_nw + 1
+                            
+                            # 将四边形分成两个三角形
+                            # 三角形1: 西南-东南-西北
+                            connectivity.append([idx_sw, idx_se, idx_nw])
+                            # 三角形2: 东南-东北-西北
+                            connectivity.append([idx_se, idx_ne, idx_nw])
+                    
+                    return np.array(connectivity, dtype=int)
+        except Exception as e:
+            print(f"网格连接创建失败: {e}")
+        
+        # 回退：创建Delaunay-like连接（简单方法）
+        # 使用最近邻创建三角形
+        connectivity = []
+        for i in range(n_points):
+            # 找到最近的两个点（不同于i）
+            distances = np.linalg.norm(positions - positions[i], axis=1)
+            distances[i] = np.inf  # 排除自身
+            
+            # 找到最近的两个点
+            nearest = np.argsort(distances)[:2]
+            if len(nearest) == 2:
+                connectivity.append([i, nearest[0], nearest[1]])
+        
+        # 去重并确保至少有一个三角形
+        if len(connectivity) > 0:
+            # 简单去重（保持顺序）
+            unique_connectivity = []
+            for tri in connectivity:
+                sorted_tri = sorted(tri)
+                if sorted_tri not in unique_connectivity:
+                    unique_connectivity.append(sorted_tri)
+            
+            return np.array(unique_connectivity[:50], dtype=int)  # 限制三角形数量
+        else:
+            # 最终回退：简单三角形
+            return np.array([[0, 1, 2]], dtype=int) if n_points >= 3 else np.array([], dtype=int).reshape(0, 3)
     
     def visualize_force_distribution(self, force_result: dict, 
                                     positions: Optional[np.ndarray] = None,

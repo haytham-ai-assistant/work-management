@@ -27,6 +27,59 @@ experimental_validation/
     └── reports/          # 实验报告
 ```
 
+## 数据收集框架
+
+项目包含完整的数据收集、处理和验证框架，位于 `data_collection/` 目录：
+
+```
+data_collection/
+├── collect_data.py          # 数据采集脚本（支持相机和力传感器同步）
+├── process_raw_data.py      # 原始数据处理脚本
+├── validate_dataset.py      # 数据集质量验证脚本
+├── create_synthetic_realistic.py  # 逼真合成数据生成脚本
+└── REAL_DATA_FORMAT.md      # 数据格式规范和收集流程指南
+```
+
+### 框架功能
+1. **数据采集** (`collect_data.py`):
+   - 支持多种相机接口（OpenCV、FLIR、Basler）
+   - 支持力传感器接口（ATI Nano17、串口/USB传感器）
+   - 提供模拟模式（无硬件时生成合成数据）
+
+2. **数据处理** (`process_raw_data.py`):
+   - 集成标记点检测和力估计算法
+   - 生成标准化的位移场和力估计数据
+   - 支持批量处理和增量处理
+
+3. **数据验证** (`validate_dataset.py`):
+   - 检查数据完整性、一致性和物理合理性
+   - 生成详细验证报告（JSON、Markdown格式）
+   - 识别数据质量问题并提供修复建议
+
+4. **合成数据生成** (`create_synthetic_realistic.py`):
+   - 基于Boussinesq解生成物理真实的位移场
+   - 模拟不同实验条件和传感器参数
+   - 生成与真实数据相同格式的数据，便于算法测试
+
+### 快速使用示例
+```bash
+# 生成合成数据
+python data_collection/create_synthetic_realistic.py --experiment_id test_001 --num_frames 60
+
+# 处理数据（跳过力估计）
+python data_collection/process_raw_data.py --experiment_id test_001 --input_dir data/synthetic/raw
+
+# 验证数据集质量
+python data_collection/validate_dataset.py --experiment_id test_001 --data_dir data/synthetic/processed
+```
+
+### 数据格式规范
+详细格式规范见 `REAL_DATA_FORMAT.md`，包括：
+- 目录结构要求
+- 文件命名约定
+- 数据格式（图像、位移场、力测量）
+- 元数据格式（JSON）
+
 ## 实验路线图
 
 ### 阶段1：标记点检测验证
@@ -116,6 +169,6 @@ from algorithms import marker_detection, force_estimation
 
 ---
 
-*最后更新：2026年2月24日*  
+*最后更新：2026年2月25日*  
 *项目负责人：[您的姓名]*  
 *Git仓库：[https://github.com/haytham-ai-assistant/work-management](https://github.com/haytham-ai-assistant/work-management)*

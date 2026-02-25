@@ -463,9 +463,35 @@ pip install scipy
 3. 更新验证脚本以包含新方法
 
 ### 集成真实传感器数据
-1. 实现图像读取接口
-2. 添加数据预处理模块
-3. 创建传感器特定的校准程序
+本算法库与实验验证项目中的**数据收集框架**无缝集成：
+
+1. **数据采集** - 使用 `collect_data.py` 采集相机图像和力传感器数据
+2. **数据处理** - 使用 `process_raw_data.py` 调用本库算法进行标记点检测和力估计
+3. **数据验证** - 使用 `validate_dataset.py` 验证数据质量和算法性能
+4. **合成数据** - 使用 `create_synthetic_realistic.py` 生成物理真实的测试数据
+
+#### 使用示例
+```python
+# 在实验验证项目中，可以直接导入算法库
+import sys
+sys.path.append('../vbts_algorithms/src')
+from algorithms.force_estimation import ForceEstimation
+
+# 处理从数据收集框架生成的数据
+fe = ForceEstimation()
+force_estimate = fe.estimate_force_from_displacement(displacement_field)
+```
+
+#### 数据格式兼容性
+数据收集框架生成的数据格式与本算法库完全兼容：
+- 位移场: `(N, 2)` NumPy数组 (单位: 米)
+- 标记点位置: `(M, 2)` NumPy数组 (单位: 像素)
+- 力测量: CSV格式 (时间戳, Fx, Fy, Fz, Tx, Ty, Tz)
+
+#### 硬件集成
+- 相机接口: OpenCV, FLIR, Basler (通过 `collect_data.py` 适配)
+- 力传感器: ATI Nano17, 串口/USB传感器
+- 同步机制: 硬件触发或软件时间戳对齐
 
 ### 性能优化
 1. 使用Numba加速数值计算

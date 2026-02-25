@@ -39,6 +39,300 @@ class ForceEstimation:
         # 计算剪切模量
         self.shear_modulus = youngs_modulus / (2 * (1 + poissons_ratio))
         
+    def filter_displacement_field(self, displacement_field: np.ndarray,
+                                positions: np.ndarray,
+                                filter_type: str = 'gaussian',
+                                filter_radius: float = 5.0) -> np.ndarray:
+        """
+        对位移场进行噪声滤波，降低力估计的噪声敏感性
+        
+        Args:
+            displacement_field: 位移场 (N, 2) 或 (N, 3) (单位: mm)
+            positions: 测量点坐标 (N, 2) (单位: mm)
+            filter_type: 滤波器类型 ('gaussian', 'median', 'moving_average', 'physical')
+            filter_radius: 滤波半径 (mm)
+            
+        Returns:
+            filtered_displacement: 滤波后的位移场
+        """
+        if len(displacement_field) < 3:
+            return displacement_field
+            
+        n_points = len(displacement_field)
+        filtered = np.zeros_like(displacement_field)
+        
+        if filter_type == 'gaussian':
+            # 高斯空间滤波
+            for i in range(n_points):
+                # 计算到当前点的距离
+                distances = np.linalg.norm(positions - positions[i], axis=1)
+                
+                # 计算高斯权重
+                weights = np.exp(-0.5 * (distances / filter_radius) ** 2)
+                weights = weights / np.sum(weights)  # 归一化
+                
+                # 加权平均
+                for d in range(displacement_field.shape[1]):
+                    filtered[i, d] = np.sum(displacement_field[:, d] * weights)
+                    
+        elif filter_type == 'median':
+            # 中值滤波（基于距离的局部邻域）
+            for i in range(n_points):
+                # 找到邻域内点
+                distances = np.linalg.norm(positions - positions[i], axis=1)
+                neighbor_indices = np.where(distances <= filter_radius)[0]
+                
+                if len(neighbor_indices) > 0:
+                    # 对每个位移分量取中值
+                    for d in range(displacement_field.shape[1]):
+                        neighbor_values = displacement_field[neighbor_indices, d]
+                        filtered[i, d] = np.median(neighbor_values)
+                else:
+                    filtered[i] = displacement_field[i]
+                    
+        elif filter_type == 'moving_average':
+            # 移动平均滤波
+            for i in range(n_points):
+                distances = np.linalg.norm(positions - positions[i], axis=1)
+                neighbor_indices = np.where(distances <= filter_radius)[0]
+                
+                if len(neighbor_indices) > 0:
+                    filtered[i] = np.mean(displacement_field[neighbor_indices], axis=0)
+                else:
+                    filtered[i] = displacement_field[i]
+                    
+        elif filter_type == 'physical':
+            # 基于物理模型的滤波
+            # 假设位移场应满足连续性和平滑性约束
+            # 使用薄板样条或类似方法
+            
+            # 计算位移梯度
+            # 简化方法：使用局部平面拟合
+            for i in range(n_points):
+                distances = np.linalg.norm(positions - positions[i], axis=1)
+                neighbor_indices = np.where(distances <= filter_radius)[0]
+                
+                if len(neighbor_indices) >= 3:
+                    # 使用局部平面拟合估计平滑位移
+                    neighbor_pos = positions[neighbor_indices]
+                    neighbor_disp = displacement_field[neighbor_indices]
+                    
+                    # 拟合平面: u = a*x + b*y + c
+                    try:
+                        # 构建设计矩阵
+                        A = np.column_stack([neighbor_pos, np.ones(len(neighbor_indices))])
+                        
+                        # 对每个位移分量拟合
+                        for d in range(displacement_field.shape[1]):
+                            coeffs, _, _, _ = np.linalg.lstsq(A, neighbor_disp[:, d], rcond=None)
+                            # 计算拟合值
+                            filtered[i, d] = np.dot([positions[i, 0], positions[i, 1], 1], coeffs)
+                    except:
+                        filtered[i] = displacement_field[i]
+                else:
+                    filtered[i] = displacement_field[i]
+        else:
+            # 未知滤波类型，返回原始数据
+            return displacement_field
+            
+        return filtered
+    
+    def analyze_displacement_field(self, displacement_field: np.ndarray,
+                                 positions: np.ndarray) -> dict:
+        """
+        分析位移场特征，为方法选择提供依据
+        
+        Args:
+            displacement_field: 位移场 (N, 2) 或 (N, 3) (单位: mm)
+            positions: 测量点坐标 (N, 2) (单位: mm)
+            
+        Returns:
+            features: 位移场特征字典
+        """
+        n_points = len(displacement_field)
+        
+        if n_points < 3:
+            return {
+                'n_points': n_points,
+                'max_displacement': 0.0,
+                'mean_displacement': 0.0,
+                'noise_level': 0.0,
+                'spatial_variation': 0.0,
+                'recommended_method': 'hertz'
+            }
+        
+        # 计算位移大小
+        displacement_magnitude = np.linalg.norm(displacement_field, axis=1)
+        max_displacement = np.max(displacement_magnitude)
+        mean_displacement = np.mean(displacement_magnitude)
+        
+        # 估计噪声水平（通过局部变化）
+        # 使用局部邻域的标准差作为噪声估计
+        noise_estimate = 0.0
+        spatial_variation = 0.0
+        
+        if n_points >= 10:
+            # 计算位移梯度的局部变化
+            local_variations = []
+            for i in range(min(50, n_points)):  # 采样点以减少计算
+                distances = np.linalg.norm(positions - positions[i], axis=1)
+                neighbor_indices = np.where(distances <= 5.0)[0]  # 5mm半径
+                
+                if len(neighbor_indices) >= 3:
+                    neighbor_displacement = displacement_magnitude[neighbor_indices]
+                    local_std = np.std(neighbor_displacement)
+                    local_variations.append(local_std)
+            
+            if local_variations:
+                noise_estimate = np.mean(local_variations)
+                spatial_variation = np.std(local_variations)
+        
+        # 计算数据密度（点/mm²）
+        if len(positions) >= 2:
+            x_range = positions[:, 0].max() - positions[:, 0].min()
+            y_range = positions[:, 1].max() - positions[:, 1].min()
+            area = x_range * y_range
+            point_density = n_points / max(area, 1.0)
+        else:
+            point_density = 0.0
+        
+        # 转换为Python float类型
+        max_displacement_float = float(max_displacement)
+        mean_displacement_float = float(mean_displacement)
+        noise_estimate_float = float(noise_estimate)
+        spatial_variation_float = float(spatial_variation)
+        point_density_float = float(point_density)
+        
+        # 基于特征推荐方法
+        recommended_method = self._recommend_method(
+            max_displacement_float, mean_displacement_float, noise_estimate_float, 
+            spatial_variation_float, point_density_float, n_points
+        )
+        
+        return {
+            'n_points': n_points,
+            'max_displacement': max_displacement_float,
+            'mean_displacement': mean_displacement_float,
+            'noise_level': noise_estimate_float,
+            'spatial_variation': spatial_variation_float,
+            'point_density': point_density_float,
+            'recommended_method': recommended_method
+        }
+    
+    def _recommend_method(self, max_displacement: float, mean_displacement: float,
+                         noise_level: float, spatial_variation: float,
+                         point_density: float, n_points: int) -> str:
+        """
+        基于位移场特征推荐最佳力估计方法
+        
+        改进的决策逻辑基于64测试用例验证结果：
+        1. Hertz: 快速(0.2ms)，误差67.8%，对小力值误差大(5N:96.3%)，对大力值较好(40N:65.9%)
+        2. Boussinesq: 慢(5.86s)，误差153.8%，但对低噪声和大力值表现更好
+        3. FEM: 误差极大(932.2%)，不推荐除非有特殊需求
+        
+        优化目标: 在精度和速度之间取得平衡
+        
+        Returns:
+            method: 推荐的方法 ('hertz', 'boussinesq', 'fem')
+        """
+        # 转换为Python float类型避免numpy类型问题
+        max_displacement = float(max_displacement)
+        mean_displacement = float(mean_displacement)
+        noise_level = float(noise_level)
+        spatial_variation = float(spatial_variation)
+        point_density = float(point_density)
+        
+        # 如果数据点太少，使用Hertz
+        if n_points < 15:
+            return 'hertz'
+        
+        # 计算噪声比率
+        noise_ratio = noise_level / max(mean_displacement, 0.01)
+        
+        # 决策树
+        # 条件1: 高噪声 -> Hertz（更稳健）
+        if noise_ratio > 0.5:  # 噪声超过位移的50%
+            return 'hertz'
+        
+        # 条件2: 低数据密度 -> Hertz
+        if point_density < 0.05:  # 低于0.05点/mm²（降低阈值）
+            return 'hertz'
+        
+        # 条件3: 极小位移 -> Hertz（Boussinesq对小位移数值不稳定）
+        if max_displacement < 0.05:  # 小于0.05mm
+            return 'hertz'
+        
+        # 条件4: 中等以上位移 + 低噪声 -> Boussinesq可能更好
+        # 基于验证结果: Boussinesq在40N时误差43.6%，Hertz在40N时误差65.9%
+        if max_displacement > 0.5:  # 位移较大
+            if noise_ratio < 0.2:  # 低噪声
+                if n_points > 30:  # 足够的数据点
+                    # 权衡: Boussinesq更精确但慢
+                    # 这里可以根据应用需求调整
+                    # 如果需要高精度且可以接受较慢计算，选择Boussinesq
+                    # 否则选择Hertz
+                    return 'boussinesq'
+        
+        # 条件5: 实时性要求高 -> Hertz（快速）
+        # 这里假设大多数应用需要实时性
+        
+        # 默认使用Hertz（平衡精度与速度）
+        return 'hertz'
+    
+    def adaptive_force_estimation(self, displacement_field: np.ndarray,
+                                positions: np.ndarray,
+                                use_filter: bool = True,
+                                filter_type: str = 'gaussian',
+                                filter_radius: float = 5.0) -> dict:
+        """
+        自适应力估计：基于位移场特征自动选择最佳方法
+        
+        Args:
+            displacement_field: 位移场 (N, 2) 或 (N, 3) (单位: mm)
+            positions: 测量点坐标 (N, 2) (单位: mm)
+            use_filter: 是否自动应用滤波
+            filter_type: 滤波类型
+            filter_radius: 滤波半径
+            
+        Returns:
+            result: 力估计结果字典，包含额外的方法选择信息
+        """
+        # 分析位移场特征
+        features = self.analyze_displacement_field(displacement_field, positions)
+        recommended_method = features['recommended_method']
+        
+        print(f"自适应方法选择:")
+        print(f"  数据点: {features['n_points']}")
+        print(f"  最大位移: {features['max_displacement']:.3f} mm")
+        print(f"  平均位移: {features['mean_displacement']:.3f} mm")
+        print(f"  噪声估计: {features['noise_level']:.3f} mm")
+        print(f"  点密度: {features['point_density']:.2f} 点/mm²")
+        print(f"  推荐方法: {recommended_method}")
+        
+        # 如果需要滤波且噪声较高
+        pre_filter = use_filter
+        if use_filter and features['noise_level'] > features['mean_displacement'] * 0.2:
+            print(f"  应用{filter_type}滤波 (噪声较高)")
+            pre_filter = True
+        
+        # 使用推荐方法进行力估计
+        result = self.estimate_force_from_displacement(
+            displacement_field, positions,
+            method=recommended_method,
+            pre_filter=pre_filter,
+            filter_type=filter_type,
+            filter_radius=filter_radius,
+            boussinesq_grid_resolution=20.0,
+            boussinesq_regularization=1e-8
+        )
+        
+        # 添加特征信息到结果
+        result['features'] = features
+        result['method_selected'] = recommended_method
+        result['filter_applied'] = pre_filter
+        
+        return result
+        
     def hertz_contact_force(self, displacement: np.ndarray, 
                            contact_radius: float = 10.0,
                            sphere_radius: float = 50.0) -> Tuple[float, np.ndarray]:
@@ -105,8 +399,11 @@ class ForceEstimation:
     
     def boussinesq_solution(self, displacement_field: np.ndarray, 
                            positions: np.ndarray, 
-                            grid_resolution: float = 20.0,
-                            regularization: float = 1e-8) -> np.ndarray:
+                             grid_resolution: float = 20.0,
+                             regularization: float = 1e-8,
+                             pre_filter: bool = False,
+                             filter_type: str = 'gaussian',
+                             filter_radius: float = 5.0) -> np.ndarray:
         """
         使用Boussinesq解计算表面力分布
         
@@ -118,10 +415,18 @@ class ForceEstimation:
             positions: 位移测量点坐标 (N, 2) (单位: mm)
             grid_resolution: 力网格分辨率 (mm)
             regularization: 正则化参数
+            pre_filter: 是否对位移场进行预滤波 (默认: False)
+            filter_type: 滤波器类型 ('gaussian', 'median', 'moving_average', 'physical')
+            filter_radius: 滤波半径 (mm)
             
         Returns:
             force_grid: 力分布网格 (M, M) (单位: N)
         """
+        # 可选的位移场预滤波
+        if pre_filter and len(displacement_field) > 3:
+            displacement_field = self.filter_displacement_field(
+                displacement_field, positions, filter_type, filter_radius
+            )
         # Boussinesq解: 弹性半空间表面点力引起的垂直位移
         # 对于点力P作用于原点，表面点(x,y)的垂直位移为:
         # u_z = P(1+ν)/(2πE) * (1-2ν)/r，其中r=√(x²+y²)
@@ -255,11 +560,25 @@ class ForceEstimation:
             if area < 1e-6:
                 continue
                 
-            # 单元刚度系数 (简化)
-            # 对于厚度为sensor_thickness的平面应力问题
-            # 刚度 ~ youngs_modulus * area / (特征长度)
-            # 使用简化的标量刚度
-            k_elem = self.youngs_modulus * area / (self.sensor_thickness * 1000.0)  # 转换为m
+            # 单元刚度系数 (改进的物理模型)
+            # 对于平面应力问题，单元刚度与 E * t * A 成正比
+            # 其中 E: 杨氏模量 (Pa), t: 厚度 (m), A: 面积 (m²)
+            # 转换为国际单位制
+            area_m2 = area * 1e-6  # mm² → m²
+            thickness_m = self.sensor_thickness * 1e-3  # mm → m
+            
+            # 简化刚度系数 (比例因子)
+            # 对于线性弹性三角形单元，刚度矩阵元素 ~ E * t * A / L²
+            # 其中 L 为特征长度，这里使用三角形平均边长
+            # 计算三角形边长
+            side1 = np.linalg.norm(p2 - p1)
+            side2 = np.linalg.norm(p3 - p2)
+            side3 = np.linalg.norm(p1 - p3)
+            avg_side = (side1 + side2 + side3) / 3.0
+            avg_side_m = avg_side * 1e-3  # mm → m
+            
+            # 刚度系数 (N/m)
+            k_elem = self.youngs_modulus * thickness_m * area_m2 / (avg_side_m ** 2)
             
             # 分配刚度到节点对 (简化: 均分到所有节点对)
             # 实际有限元需要形函数，这里简化
@@ -284,31 +603,51 @@ class ForceEstimation:
             except:
                 pass  # 条件数计算失败时继续
         
-        # 添加Tikhonov正则化
-        # 使用正则化参数乘以单位矩阵
-        K_reg = K + np.eye(2 * n_nodes) * self.youngs_modulus * regularization
+        # 添加Tikhonov正则化 (改进版)
+        # 基于刚度矩阵迹调整正则化强度
         
-        # 位移向量 (展平)
-        u = displacement_field.flatten()
+        # 默认正则化强度
+        reg_strength = self.youngs_modulus * regularization
+        
+        if n_nodes > 0:
+            # 计算刚度矩阵迹（对角线元素和）作为参考
+            try:
+                K_trace = np.trace(K) / (2 * n_nodes)  # 平均对角线值
+                # 如果迹很小或为零，使用默认值
+                if K_trace > 1e-10:
+                    # 自适应正则化：正则化项 = α * K_trace * I
+                    # 其中 α 是正则化参数
+                    alpha = regularization
+                    reg_strength = alpha * K_trace
+            except:
+                pass  # 使用默认值
+        
+        # 应用正则化
+        K_reg = K + np.eye(2 * n_nodes) * reg_strength
+        
+        # 位移向量 (展平并转换为米)
+        u_mm = displacement_field.flatten()  # 单位: mm
+        u_m = u_mm * 1e-3  # 单位: m
         
         # 确保尺寸匹配
-        if len(u) != K_reg.shape[0]:
+        if len(u_m) != K_reg.shape[0]:
             # 如果尺寸不匹配，创建简单对角刚度矩阵
             print("警告: 位移场尺寸与节点数不匹配，使用简化刚度矩阵")
-            K_reg = np.eye(len(u)) * self.youngs_modulus * 0.1
+            K_reg = np.eye(len(u_m)) * self.youngs_modulus * 0.1
         
-        # 计算力: f = K_reg * u  (使用正则化后的刚度矩阵)
+        # 计算力: f = K_reg * u_m  (使用正则化后的刚度矩阵)
+        # K_reg 单位: N/m, u_m 单位: m → f 单位: N
         try:
-            f = K_reg @ u
+            f = K_reg @ u_m
         except np.linalg.LinAlgError as e:
             # 如果矩阵求解失败，尝试使用伪逆
             print(f"警告: 矩阵求解失败 ({e})，使用伪逆")
             try:
-                f = np.linalg.pinv(K_reg) @ u
+                f = np.linalg.pinv(K_reg) @ u_m
             except:
                 # 如果伪逆也失败，使用简化方法
                 print("警告: 伪逆也失败，使用简化方法")
-                f = u * self.youngs_modulus * 0.01  # 更小的比例因子
+                f = u_m * self.youngs_modulus * 0.01  # 更小的比例因子
         
         # 重塑为节点力 (N, 2)
         node_forces = f.reshape(-1, 2)
@@ -317,7 +656,12 @@ class ForceEstimation:
     
     def estimate_force_from_displacement(self, displacement_field: np.ndarray,
                                         positions: np.ndarray,
-                                        method: str = 'boussinesq') -> dict:
+                                        method: str = 'boussinesq',
+                                        pre_filter: bool = False,
+                                        filter_type: str = 'gaussian',
+                                        filter_radius: float = 5.0,
+                                        boussinesq_grid_resolution: float = 20.0,
+                                        boussinesq_regularization: float = 1e-8) -> dict:
         """
         从位移场估计力分布
         
@@ -325,6 +669,11 @@ class ForceEstimation:
             displacement_field: 位移场 (N, 2)
             positions: 测量点位置 (N, 2)
             method: 力估计方法 ('hertz', 'boussinesq', 'fem')
+            pre_filter: 是否对位移场进行预滤波 (默认: False)
+            filter_type: 滤波器类型 ('gaussian', 'median', 'moving_average', 'physical')
+            filter_radius: 滤波半径 (mm)
+            boussinesq_grid_resolution: Boussinesq方法网格分辨率 (mm)
+            boussinesq_regularization: Boussinesq方法正则化参数
             
         Returns:
             result: 包含力估计结果的字典
@@ -363,7 +712,12 @@ class ForceEstimation:
         elif method == 'boussinesq':
             # 使用Boussinesq解
             force_grid = self.boussinesq_solution(
-                displacement_field, positions, grid_resolution=20.0, regularization=1e-8
+                displacement_field, positions, 
+                grid_resolution=boussinesq_grid_resolution, 
+                regularization=boussinesq_regularization,
+                pre_filter=pre_filter,
+                filter_type=filter_type,
+                filter_radius=filter_radius
             )
             
             result['force_distribution'] = force_grid
@@ -379,6 +733,12 @@ class ForceEstimation:
         
         elif method == 'fem':
             # 使用有限元反问题
+            # 可选：对位移场进行预滤波
+            if pre_filter and len(displacement_field) > 3:
+                displacement_field = self.filter_displacement_field(
+                    displacement_field, positions, filter_type, filter_radius
+                )
+            
             # 生成简单三角形网格
             # 尝试导入scipy生成Delaunay三角网格，失败时使用简单网格
             try:
